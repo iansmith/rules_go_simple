@@ -12,6 +12,7 @@ Internal definitions may change without notice.
 
 load(
     "//internal:rules.bzl",
+    _go_assembly = "go_assembly",
     _go_binary = "go_binary",
     _go_library = "go_library",
     _go_test = "go_test",
@@ -24,4 +25,5 @@ load(
 go_binary = _go_binary
 go_library = _go_library
 go_test = _go_test
+go_assembly = _go_assembly
 GoLibraryInfo = _GoLibraryInfo

@@ -149,7 +149,10 @@ func test(args []string) error {
 	defer os.Remove(testmainSrcPath)
 
 	for _, arc := range transitiveArchives {
-		archiveMap[arc.packagePath] = arc.filePath
+		if packageSubstitutionRemoval(arc.packagePath) {
+			continue
+		}
+		archiveMap[packageSubstitution(arc.packagePath)] = arc.filePath
 	}
 	importcfgPath, err := writeTempImportcfg(archiveMap)
 	if err != nil {
@@ -166,12 +169,12 @@ func test(args []string) error {
 	if err := testMainArchiveFile.Close(); err != nil {
 		return err
 	}
-	if err := runCompiler("main", importcfgPath, []string{testmainSrcPath}, testMainArchivePath); err != nil {
+	if err := runCompiler("main", importcfgPath, []string{testmainSrcPath}, testMainArchivePath,archiveMap); err != nil {
 		return err
 	}
 
 	// Link everything together.
-	return runLinker(testMainArchivePath, importcfgPath, outPath)
+	return runLinker(testMainArchivePath, importcfgPath, archiveMap, outPath, false, "")
 }
 
 func compileTestArchive(packagePath string, srcPaths []string, srcs []sourceInfo, archiveMap map[string]string) (string, error) {
@@ -190,7 +193,7 @@ func compileTestArchive(packagePath string, srcPaths []string, srcs []sourceInfo
 		return "", err
 	}
 
-	if err := runCompiler(packagePath, importcfgPath, srcPaths, tmpArchivePath); err != nil {
+	if err := runCompiler(packagePath, importcfgPath, srcPaths, tmpArchivePath,archiveMap); err != nil {
 		os.Remove(tmpArchivePath)
 		return "", err
 	}

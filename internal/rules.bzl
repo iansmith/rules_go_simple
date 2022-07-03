@@ -13,11 +13,13 @@ actions).
 load(
     ":actions.bzl",
     "declare_archive",
+    "go_asm",
     "go_build_test",
     "go_build_tool",
     "go_compile",
     "go_link",
     "go_write_stdimportcfg",
+    "parigot_link",
 )
 load(":providers.bzl", "GoLibraryInfo")
 
@@ -25,12 +27,15 @@ def _go_binary_impl(ctx):
     # Declare an output file for the main package and compile it from srcs. All
     # our output files will start with a prefix to avoid conflicting with
     # other rules.
+    gooutput = ctx.actions.declare_file("_go.o_")
     main_archive = declare_archive(ctx, "main")
     go_compile(
         ctx,
         srcs = ctx.files.srcs,
         deps = [dep[GoLibraryInfo] for dep in ctx.attr.deps],
-        out = main_archive,
+        lib = main_archive,
+        out = gooutput,
+        extra_objs = ctx.files.extra_objs,
     )
 
     # Declare an output file for the executable and link it. Note that output
@@ -38,11 +43,17 @@ def _go_binary_impl(ctx):
     # prefix here.
     executable_path = "{name}%/{name}".format(name = ctx.label.name)
     executable = ctx.actions.declare_file(executable_path)
-    go_link(
+
+    fn = go_link
+    if ctx.attr.parigot == True:
+        fn = parigot_link
+    fn(
         ctx,
         main = main_archive,
         deps = [dep[GoLibraryInfo] for dep in ctx.attr.deps],
         out = executable,
+        extra_objs = ctx.files.extra_objs,
+        linker_script = ctx.attr.linker_script,
     )
 
     # Return the DefaultInfo provider. This tells Bazel what files should be
@@ -72,10 +83,22 @@ go_binary = rule(
             allow_files = True,
             doc = "Data files available to this binary at run-time",
         ),
+        "extra_objs": attr.label_list(
+            allow_files = True,
+            doc = "Extra object files to add to binary",
+        ),
+        "parigot": attr.bool(
+            default = False,
+            doc = "set to true for linking for parigot",
+        ),
+        "linker_script": attr.label(
+            allow_single_file = True,
+            doc = "linker script for this binary, usually only used for parigot links",
+        ),
         "_builder": attr.label(
             default = "//internal/builder",
             executable = True,
-            cfg = "host",
+            cfg = "exec",
         ),
         "_stdimportcfg": attr.label(
             default = "//internal/builder:stdimportcfg",
@@ -121,18 +144,21 @@ will be compiled, and they may only depend on the standard library.
 def _go_library_impl(ctx):
     # Declare an output file for the library package and compile it from srcs.
     archive = declare_archive(ctx, ctx.attr.importpath)
+    gocompiledout = ctx.actions.declare_file("_go.o_")
     go_compile(
         ctx,
         srcs = ctx.files.srcs,
+        extra_objs = ctx.files.extra_objs,
         importpath = ctx.attr.importpath,
         deps = [dep[GoLibraryInfo] for dep in ctx.attr.deps],
-        out = archive,
+        lib = archive,
+        out = gocompiledout,
     )
 
     # Return the output file and metadata about the library.
     return [
         DefaultInfo(
-            files = depset([archive]),
+            files = depset([archive, gocompiledout]),
             runfiles = ctx.runfiles(collect_data = True),
         ),
         GoLibraryInfo(
@@ -151,7 +177,7 @@ go_library = rule(
     _go_library_impl,
     attrs = {
         "srcs": attr.label_list(
-            allow_files = [".go"],
+            allow_files = [".go", ".o"],
             doc = "Source files to compile",
         ),
         "deps": attr.label_list(
@@ -162,6 +188,10 @@ go_library = rule(
             allow_files = True,
             doc = "Data files available to binaries using this library",
         ),
+        "extra_objs": attr.label_list(
+            allow_files = True,
+            doc = "Extra object files to add to library",
+        ),
         "importpath": attr.string(
             mandatory = True,
             doc = "Name by which the library may be imported",
@@ -169,7 +199,7 @@ go_library = rule(
         "_builder": attr.label(
             default = "//internal/builder",
             executable = True,
-            cfg = "host",
+            cfg = "exec",
         ),
         "_stdimportcfg": attr.label(
             default = "//internal/builder:stdimportcfg",
@@ -220,7 +250,7 @@ go_test = rule(
         "_builder": attr.label(
             default = "//internal/builder",
             executable = True,
-            cfg = "host",
+            cfg = "exec",
         ),
         "_stdimportcfg": attr.label(
             default = "//internal/builder:stdimportcfg",
@@ -244,9 +274,68 @@ go_stdimportcfg = rule(
         "_builder": attr.label(
             default = "//internal/builder",
             executable = True,
-            cfg = "host",
+            cfg = "exec",
         ),
     },
     doc = """Generates an importcfg file for the Go standard library.
 importcfg files map Go package paths to file paths.""",
+)
+
+def _go_asm_impl(ctx):
+    # Declare an output file for the output binary and assemble from srcs
+    output = ctx.actions.declare_file(ctx.attr.name)
+    go_asm(
+        ctx,
+        srcs = ctx.files.srcs,
+        importpath = ctx.attr.importpath,
+        includepath = ctx.attr.includepath,
+        out = output,
+    )
+
+    # Return the output file
+    return [
+        DefaultInfo(
+            files = depset([output]),
+            runfiles = ctx.runfiles(collect_data = True),
+        ),
+        GoLibraryInfo(
+            info = struct(
+                importpath = ctx.attr.importpath,
+                archive = output,
+            ),
+            #deps = depset(direct = generated),
+            deps = depset(
+                # deps are not allowed!
+                direct = [dep[GoLibraryInfo].info for dep in []],
+                transitive = [dep[GoLibraryInfo].deps for dep in []],
+            ),
+        ),
+    ]
+
+go_assembly = rule(
+    _go_asm_impl,
+    attrs = {
+        "srcs": attr.label_list(
+            allow_files = [".s"],
+            doc = "Source files to compile",
+        ),
+        "importpath": attr.string(
+            mandatory = True,
+            doc = "Name by which the library may be imported",
+        ),
+        "includepath": attr.string(
+            mandatory = False,
+            doc = "Directory to search for .h files used by the assembly code",
+        ),
+        "data": attr.label_list(
+            allow_files = True,
+            doc = "Data files available to this binary at run-time",
+        ),
+        "_builder": attr.label(
+            default = "//internal/builder",
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+    doc = "Compiles an object file from Go assembly",
 )

@@ -120,13 +120,16 @@ func writeTempImportcfg(archiveMap map[string]string) (string, error) {
 func writeImportcfg(archiveMap map[string]string, outPath string) error {
 	pkgPaths := make([]string, 0, len(archiveMap))
 	for pkgPath := range archiveMap {
+		if packageSubstitutionRemoval(pkgPath) {
+			continue
+		}
 		pkgPaths = append(pkgPaths, pkgPath)
 	}
 	sort.Strings(pkgPaths)
 
 	buf := &bytes.Buffer{}
 	for _, pkgPath := range pkgPaths {
-		fmt.Fprintf(buf, "packagefile %s=%s\n", pkgPath, archiveMap[pkgPath])
+		fmt.Fprintf(buf, "packagefile %s=%s\n", packageSubstitution(pkgPath), archiveMap[pkgPath])
 	}
 
 	return ioutil.WriteFile(outPath, buf.Bytes(), 0666)

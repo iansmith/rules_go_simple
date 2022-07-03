@@ -17,7 +17,7 @@ func main() {
 	log.SetFlags(0)
 	log.SetPrefix("builder: ")
 	if len(os.Args) <= 2 {
-		log.Fatalf("usage: %s stdimportcfg|compile|link|test options...", os.Args[0])
+		log.Fatalf("usage: %s stdimportcfg|compile|asm|link|parigot_link|test options...", os.Args[0])
 	}
 	verb := os.Args[1]
 	args := os.Args[2:]
@@ -30,8 +30,12 @@ func main() {
 		action = compile
 	case "link":
 		action = link
+	case "parigot_link":
+		action = parigot_link
 	case "test":
 		action = test
+	case "asm":
+		action = asm
 	default:
 		log.Fatalf("unknown action: %s", verb)
 	}

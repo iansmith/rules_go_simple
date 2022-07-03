@@ -26,51 +26,73 @@ def declare_archive(ctx, importpath):
     Returns:
         A File that should be written by the compiler.
     """
-    return ctx.actions.declare_file("{name}%/{importpath}.a".format(
+    raw = "{name}%/{importpath}.a".format(
         name = ctx.label.name,
         importpath = importpath,
-    ))
+    )
+    parts = raw.split("/")
+    if len(parts) > 1:
+        last = len(parts) - 1
+        parts[last] = "lib" + parts[last]
+        raw = "/".join(parts)
 
-def _search_dir(info):
-    """Returns a directory that should be searched.
+    return ctx.actions.declare_file(raw)
 
-    This directory is passed to the compiler or linker with the -I and -L flags,
-    respectively, to find the archive file for a library. The archive
-    must have been declared with declare_archive.
+# def _search_dir(info):
+#     """Returns a directory that should be searched.
 
-    Args:
-        info: GoLibraryInfo.info for this library.
-    Returns:
-        A path string for the directory.
-    """
-    suffix_len = len("/" + info.importpath + ".a")
-    return info.archive.path[:-suffix_len]
+#     This directory is passed to the compiler or linker with the -I and -L flags,
+#     respectively, to find the archive file for a library. The archive
+#     must have been declared with declare_archive.
 
-def go_compile(ctx, srcs, out, importpath = "", deps = []):
+#     Args:
+#         info: GoLibraryInfo.info for this library.
+#     Returns:
+#         A path string for the directory.
+#     """
+#     suffix_len = len("/" + info.importpath + ".a")
+#     return info.archive.path[:-suffix_len]
+
+def go_compile(ctx, srcs, out, lib, extra_objs = [], importpath = "", deps = []):
     """Compiles a single Go package from sources.
 
     Args:
         ctx: analysis context.
         srcs: list of source Files to be compiled.
-        out: output .a file. Should have the importpath as a suffix,
+        out: where the compiled result of the go source should be placed (usually _go.o_)
+        lib: output .a file. Should have the importpath as a suffix (except the lib),
             for example, library "example.com/foo" should have the path
-            "somedir/example.com/foo.a".
+            "somedir/example.com/libfoo.a".
+        extra_objs: objects to be added to the archive,
         importpath: the path other libraries may use to import this package.
         deps: list of GoLibraryInfo objects for direct dependencies.
     """
     args = ctx.actions.args()
     args.add("compile")
     args.add("-stdimportcfg", ctx.file._stdimportcfg)
-    dep_infos = [d.info for d in deps]
-    args.add_all(dep_infos, before_each = "-arc", map_each = _format_arc)
+    dep_infos = [d for d in deps]
+    filtered_dep_infos = []
+    extra_inputs = []
+    for d in dep_infos:
+        if d.info.importpath == "":
+            extra_inputs.append(d.info.archive)
+            continue
+        if not d.info.archive.path.endswith(".o"):
+            filtered_dep_infos.append(d)
+            # no need to add to extra_inputs, it should be in extra_objs
+
+    args.add_all(filtered_dep_infos, before_each = "-arc", map_each = _format_arc)  ### was transitive deps
     if importpath:
         args.add("-p", importpath)
+    if len(extra_objs) > 0:
+        args.add_joined("-a", extra_objs, join_with = ",")
     args.add("-o", out)
+    args.add("-l", lib)
     args.add_all(srcs)
 
-    inputs = srcs + [dep.info.archive for dep in deps] + [ctx.file._stdimportcfg]
+    inputs = srcs + [dep.info.archive for dep in filtered_dep_infos] + [ctx.file._stdimportcfg] + extra_inputs + extra_objs
     ctx.actions.run(
-        outputs = [out],
+        outputs = [out, lib],
         inputs = inputs,
         executable = ctx.executable._builder,
         arguments = [args],
@@ -78,35 +100,95 @@ def go_compile(ctx, srcs, out, importpath = "", deps = []):
         use_default_shell_env = True,
     )
 
-def go_link(ctx, out, main, deps = []):
+def parigot_link(ctx, out, main, linker_script = "", extra_objs = [], deps = []):
+    """Links a Go executable for parigot.
+
+    Args:
+        ctx: analysis context.
+        out: output executable file.
+        main: archive file for the main package.
+        extra_objs: additional objects to add the binary.
+        linker_script: passed to the link stage with -T, usually used with a parigot link.
+        deps: list of GoLibraryInfo objects for direct dependencies.
+    """
+    _go_link_impl(ctx, out, main, linker_script, extra_objs, deps, True)
+
+def go_link(ctx, out, main, linker_script, extra_objs = [], deps = []):
     """Links a Go executable.
 
     Args:
         ctx: analysis context.
         out: output executable file.
         main: archive file for the main package.
+        extra_objs: additional objects to add the binary.
         deps: list of GoLibraryInfo objects for direct dependencies.
+        linker_script: passed to the link stage with -T, typically not needed for a normal link.
     """
-    transitive_deps = depset(
-        direct = [d.info for d in deps],
-        transitive = [d.deps for d in deps],
-    )
-    inputs = [main, ctx.file._stdimportcfg] + [d.archive for d in transitive_deps.to_list()]
+    _go_link_impl(ctx, out, main, linker_script, extra_objs, deps)
+
+def _go_link_impl(ctx, out, main, linker_script, extra_objs = [], deps = [], parigot_link = False):
+    """Links a Go executable, possibly for parigot.
+
+    Args:
+        ctx: analysis context.
+        out: output executable file.
+        main: archive file for the main package.
+        extra_objs: additional objects to add the binary.
+        deps: list of GoLibraryInfo objects for direct dependencies.
+        linker_script: passed to the link stage with -T.
+        parigot_link: boolean that should be true for parigot link
+    """
+    filtered_dep_infos = []
+    extra_inputs = []
+    for d in [d for d in deps]:
+        if d.info.importpath == "":
+            extra_inputs.append(d.info.archive)
+            continue
+        if not (d.info.archive.path.endswith(".o")):
+            filtered_dep_infos.append(d)
+            # no need to add to extra_inputs,its already in extra_objs
+
+    inputs = [main, ctx.file._stdimportcfg] + [d.info.archive for d in filtered_dep_infos] + extra_inputs + extra_objs
+
+    cmd = "link"
+    if parigot_link:
+        cmd = "parigot_link"
 
     args = ctx.actions.args()
-    args.add("link")
+    args.add(cmd)
+
     args.add("-stdimportcfg", ctx.file._stdimportcfg)
-    args.add_all(transitive_deps, before_each = "-arc", map_each = _format_arc)
+    args.add_all(filtered_dep_infos, before_each = "-arc", map_each = _format_arc)  ### was transitive deps
     args.add("-main", main)
     args.add("-o", out)
+    if len(extra_objs) > 0:
+        args.add("-a", ",".join([o.path for o in extra_objs]))
+    if linker_script != "":
+        x = type(linker_script)
+        script = linker_script
+        if x == "Target":
+            f = linker_script.files.to_list()
+            if len(f) > 1:
+                fail("linker script target" + linker_script + " must produce exactly one file")
+            script = f[0].path
+        elif x == "File":
+            script = linker_script.path
+        args.add("-T", script)
+
+    mnenomic = "GoLink"
+    if parigot_link:
+        mnenomic = "ParigotLink"
 
     ctx.actions.run(
         outputs = [out],
         inputs = inputs,
         executable = ctx.executable._builder,
         arguments = [args],
-        mnemonic = "GoLink",
+        mnemonic = mnenomic,
         use_default_shell_env = True,
+        env = {
+            "GOARCH": "arm64",
+        },
     )
 
 def go_build_test(ctx, srcs, deps, out, rundir = "", importpath = ""):
@@ -193,4 +275,34 @@ def go_write_stdimportcfg(ctx, out):
 
 def _format_arc(lib):
     """Formats a GoLibraryInfo.info object as an -arc argument"""
-    return "{}={}".format(lib.importpath, lib.archive.path)
+    return "{}={}".format(lib.info.importpath, lib.info.archive.path)
+
+def go_asm(ctx, srcs, out, includepath = "", importpath = ""):
+    """Compiles a set of Go assembler files.
+
+    Args:
+        ctx: analysis context.
+        srcs: list of source Files to be compiled.
+        out: archive for the .o files to be added to.
+        includepath: the path to search for .h files used by the assembly code
+        importpath: the path other libraries may use to import this package.
+
+    """
+    args = ctx.actions.args()
+    args.add("asm")
+    if importpath:
+        args.add("-p", importpath)
+    if len(includepath) > 0:
+        args.add("-I", includepath)
+    args.add("-o", out)
+    args.add_all(srcs)
+
+    inputs = srcs
+    ctx.actions.run(
+        outputs = [out],
+        inputs = inputs,
+        executable = ctx.executable._builder,
+        arguments = [args],
+        mnemonic = "GoAsm",
+        use_default_shell_env = True,
+    )
